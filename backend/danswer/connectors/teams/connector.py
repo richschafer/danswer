@@ -87,13 +87,14 @@ def _get_channels_from_teams(
 
     return channels_list
 
+def _get_first_poster(top_message: ChatMessage) -> str:
+    # Some keys in the properties dict have a value of None. This ensures that a non-None value is always returned.
+    message_from = top_message.properties.get("from") or {}
+    user = message_from.get("user") or {}
+    return user.get("displayName", "Unknown User")
 
 def _construct_semantic_identifier(channel: Channel, top_message: ChatMessage) -> str:
-    first_poster = (
-        top_message.properties.get("from", {})
-        .get("user", {})
-        .get("displayName", "Unknown User")
-    )
+    first_poster = (_get_first_poster(top_message))
     channel_name = channel.properties.get("displayName", "Unknown")
     thread_subject = top_message.properties.get("subject", "Unknown")
 
@@ -210,7 +211,8 @@ class TeamsConnector(LoadConnector, PollConnector):
 
         teams_list: list[Team] = []
 
-        teams = self.graph_client.teams.get().execute_query()
+        teams = self.graph_client.teams.paged(500).get().execute_query()
+        logger.info(f"Found {len(teams)} total teams")
 
         if len(self.requested_team_list) > 0:
             adjusted_request_strings = [
@@ -225,6 +227,7 @@ class TeamsConnector(LoadConnector, PollConnector):
         else:
             teams_list.extend(teams)
 
+        logger.info(f"Indexing {len(teams)} teams")
         return teams_list
 
     def _fetch_from_teams(
