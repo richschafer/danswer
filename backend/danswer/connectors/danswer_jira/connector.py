@@ -173,6 +173,7 @@ def fetch_jira_issues_batch(
             pass
 
         metadata_dict = {}
+        metadata_dict['key']=jira.key
         priority = best_effort_get_field_from_issue(jira, "priority")
         if priority:
             metadata_dict["priority"] = priority.name
