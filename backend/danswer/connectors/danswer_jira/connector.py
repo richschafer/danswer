@@ -191,7 +191,8 @@ def fetch_jira_issues_batch(
                 id=page_url,
                 sections=[Section(link=page_url, text=ticket_content)],
                 source=DocumentSource.JIRA,
-                semantic_identifier=jira.fields.summary,
+                semantic_identifier=jira.key,
+                title=jira.fields.summary,
                 doc_updated_at=time_str_to_utc(jira.fields.updated),
                 primary_owners=list(people) or None,
                 # TODO add secondary_owners (commenters) if needed
