@@ -7,9 +7,9 @@ from danswer.configs.app_configs import CONFLUENCE_CONNECTOR_LABELS_TO_SKIP
 from danswer.configs.app_configs import CONTINUE_ON_CONNECTOR_FAILURE
 from danswer.configs.app_configs import INDEX_BATCH_SIZE
 from danswer.configs.constants import DocumentSource
+from danswer.connectors.confluence.onyx_confluence import build_confluence_client
 from danswer.connectors.confluence.onyx_confluence import OnyxConfluence
 from danswer.connectors.confluence.utils import attachment_to_content
-from danswer.connectors.confluence.utils import build_confluence_client
 from danswer.connectors.confluence.utils import build_confluence_document_id
 from danswer.connectors.confluence.utils import datetime_from_string
 from danswer.connectors.confluence.utils import extract_text_from_confluence_html
@@ -50,6 +50,8 @@ _RESTRICTIONS_EXPANSION_FIELDS = [
     "restrictions.read.restrictions.user",
     "restrictions.read.restrictions.group",
 ]
+
+_SLIM_DOC_BATCH_SIZE = 1000
 
 
 class ConfluenceConnector(LoadConnector, PollConnector, SlimConnector):
@@ -112,7 +114,7 @@ class ConfluenceConnector(LoadConnector, PollConnector, SlimConnector):
         # see https://github.com/atlassian-api/atlassian-python-api/blob/master/atlassian/rest_client.py
         # for a list of other hidden constructor args
         self._confluence_client = build_confluence_client(
-            credentials_json=credentials,
+            credentials=credentials,
             is_cloud=self.is_cloud,
             wiki_base=self.wiki_base,
         )
@@ -263,6 +265,7 @@ class ConfluenceConnector(LoadConnector, PollConnector, SlimConnector):
         for page in self.confluence_client.cql_paginate_all_expansions(
             cql=page_query,
             expand=restrictions_expand,
+            limit=_SLIM_DOC_BATCH_SIZE,
         ):
             # If the page has restrictions, add them to the perm_sync_data
             # These will be used by doc_sync.py to sync permissions
@@ -286,6 +289,7 @@ class ConfluenceConnector(LoadConnector, PollConnector, SlimConnector):
             for attachment in self.confluence_client.cql_paginate_all_expansions(
                 cql=attachment_cql,
                 expand=restrictions_expand,
+                limit=_SLIM_DOC_BATCH_SIZE,
             ):
                 doc_metadata_list.append(
                     SlimDocument(
