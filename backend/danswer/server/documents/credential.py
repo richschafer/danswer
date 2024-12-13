@@ -9,7 +9,6 @@ from danswer.auth.users import current_curator_or_admin_user
 from danswer.auth.users import current_user
 from danswer.db.credentials import alter_credential
 from danswer.db.credentials import cleanup_gmail_credentials
-from danswer.db.credentials import cleanup_google_drive_credentials
 from danswer.db.credentials import create_credential
 from danswer.db.credentials import CREDENTIAL_PERMISSIONS_TO_IGNORE
 from danswer.db.credentials import delete_credential
@@ -133,8 +132,6 @@ def create_credential_from_model(
     # Temporary fix for empty Google App credentials
     if credential_info.source == DocumentSource.GMAIL:
         cleanup_gmail_credentials(db_session=db_session)
-    if credential_info.source == DocumentSource.GOOGLE_DRIVE:
-        cleanup_google_drive_credentials(db_session=db_session)
 
     credential = create_credential(credential_info, user, db_session)
     return ObjectCreationIdResponse(
@@ -181,7 +178,13 @@ def update_credential_data(
     user: User = Depends(current_user),
     db_session: Session = Depends(get_session),
 ) -> CredentialBase:
-    credential = alter_credential(credential_id, credential_update, user, db_session)
+    credential = alter_credential(
+        credential_id,
+        credential_update.name,
+        credential_update.credential_json,
+        user,
+        db_session,
+    )
 
     if credential is None:
         raise HTTPException(

@@ -25,7 +25,6 @@ from danswer.auth.schemas import UserCreate
 from danswer.auth.schemas import UserRead
 from danswer.auth.schemas import UserUpdate
 from danswer.auth.users import auth_backend
-from danswer.auth.users import BasicAuthenticationError
 from danswer.auth.users import create_danswer_oauth_router
 from danswer.auth.users import fastapi_users
 from danswer.configs.app_configs import APP_API_PREFIX
@@ -45,6 +44,7 @@ from danswer.configs.constants import AuthType
 from danswer.configs.constants import POSTGRES_WEB_APP_NAME
 from danswer.db.engine import SqlEngine
 from danswer.db.engine import warm_up_connections
+from danswer.server.api_key.api import router as api_key_router
 from danswer.server.auth_check import check_router_auth
 from danswer.server.danswer_api.ingestion import router as danswer_api_router
 from danswer.server.documents.cc_pair import router as cc_pair_router
@@ -52,12 +52,9 @@ from danswer.server.documents.connector import router as connector_router
 from danswer.server.documents.credential import router as credential_router
 from danswer.server.documents.document import router as document_router
 from danswer.server.documents.indexing import router as indexing_router
+from danswer.server.documents.standard_oauth import router as standard_oauth_router
 from danswer.server.features.document_set.api import router as document_set_router
 from danswer.server.features.folder.api import router as folder_router
-from danswer.server.features.input_prompt.api import (
-    admin_router as admin_input_prompt_router,
-)
-from danswer.server.features.input_prompt.api import basic_router as input_prompt_router
 from danswer.server.features.notifications.api import router as notification_router
 from danswer.server.features.persona.api import admin_router as admin_persona_router
 from danswer.server.features.persona.api import basic_router as persona_router
@@ -78,6 +75,7 @@ from danswer.server.manage.search_settings import router as search_settings_rout
 from danswer.server.manage.slack_bot import router as slack_bot_management_router
 from danswer.server.manage.users import router as user_router
 from danswer.server.middleware.latency_logging import add_latency_logging_middleware
+from danswer.server.oauth import router as oauth_router
 from danswer.server.openai_assistants_api.full_openai_assistants_api import (
     get_full_openai_assistants_api_router,
 )
@@ -91,6 +89,7 @@ from danswer.server.settings.api import basic_router as settings_router
 from danswer.server.token_rate_limits.api import (
     router as token_rate_limit_settings_router,
 )
+from danswer.server.utils import BasicAuthenticationError
 from danswer.setup import setup_danswer
 from danswer.setup import setup_multitenant_danswer
 from danswer.utils.logger import setup_logger
@@ -103,7 +102,6 @@ from danswer.utils.variable_functionality import set_is_ee_based_on_env_variable
 from shared_configs.configs import CORS_ALLOWED_ORIGIN
 from shared_configs.configs import MULTI_TENANT
 from shared_configs.configs import SENTRY_DSN
-
 
 logger = setup_logger()
 
@@ -205,7 +203,7 @@ def log_http_error(_: Request, exc: Exception) -> JSONResponse:
 
     if isinstance(exc, BasicAuthenticationError):
         # For BasicAuthenticationError, just log a brief message without stack trace (almost always spam)
-        logger.error(f"Authentication failed: {str(exc)}")
+        logger.warning(f"Authentication failed: {str(exc)}")
 
     elif status_code >= 400:
         error_msg = f"{str(exc)}\n"
@@ -258,8 +256,6 @@ def get_application() -> FastAPI:
     )
     include_router_with_global_prefix_prepended(application, persona_router)
     include_router_with_global_prefix_prepended(application, admin_persona_router)
-    include_router_with_global_prefix_prepended(application, input_prompt_router)
-    include_router_with_global_prefix_prepended(application, admin_input_prompt_router)
     include_router_with_global_prefix_prepended(application, notification_router)
     include_router_with_global_prefix_prepended(application, prompt_router)
     include_router_with_global_prefix_prepended(application, tool_router)
@@ -281,6 +277,9 @@ def get_application() -> FastAPI:
         application, get_full_openai_assistants_api_router()
     )
     include_router_with_global_prefix_prepended(application, long_term_logs_router)
+    include_router_with_global_prefix_prepended(application, standard_oauth_router)
+    include_router_with_global_prefix_prepended(application, api_key_router)
+    include_router_with_global_prefix_prepended(application, oauth_router)
 
     if AUTH_TYPE == AuthType.DISABLED:
         # Server logs this during auth setup verification step

@@ -196,7 +196,7 @@ def seed_initial_documents(
     docs, chunks = _create_indexable_chunks(processed_docs, tenant_id)
 
     index_doc_batch_prepare(
-        document_batch=docs,
+        documents=docs,
         index_attempt_metadata=IndexAttemptMetadata(
             connector_id=connector_id,
             credential_id=PUBLIC_CREDENTIAL_ID,
@@ -216,7 +216,7 @@ def seed_initial_documents(
     # as we just sent over the Vespa schema and there is a slight delay
 
     index_with_retries = retry_builder()(document_index.index)
-    index_with_retries(chunks=chunks)
+    index_with_retries(chunks=chunks, fresh_index=True)
 
     # Mock a run for the UI even though it did not actually call out to anything
     mock_successful_index_attempt(

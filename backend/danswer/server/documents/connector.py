@@ -17,9 +17,10 @@ from danswer.auth.users import current_admin_user
 from danswer.auth.users import current_curator_or_admin_user
 from danswer.auth.users import current_user
 from danswer.background.celery.celery_utils import get_deletion_attempt_snapshot
-from danswer.background.celery.tasks.indexing.tasks import try_creating_indexing_task
 from danswer.background.celery.versioned_apps.primary import app as primary_app
 from danswer.configs.app_configs import ENABLED_CONNECTOR_TYPES
+from danswer.configs.constants import DanswerCeleryPriority
+from danswer.configs.constants import DanswerCeleryTask
 from danswer.configs.constants import DocumentSource
 from danswer.configs.constants import FileOrigin
 from danswer.connectors.google_utils.google_auth import (
@@ -54,11 +55,15 @@ from danswer.connectors.google_utils.google_kv import verify_csrf
 from danswer.connectors.google_utils.shared_constants import (
     DB_CREDENTIALS_DICT_TOKEN_KEY,
 )
+from danswer.connectors.google_utils.shared_constants import (
+    GoogleOAuthAuthenticationMethod,
+)
 from danswer.db.connector import create_connector
 from danswer.db.connector import delete_connector
 from danswer.db.connector import fetch_connector_by_id
 from danswer.db.connector import fetch_connectors
 from danswer.db.connector import get_connector_credential_ids
+from danswer.db.connector import mark_ccpair_with_indexing_trigger
 from danswer.db.connector import update_connector
 from danswer.db.connector_credential_pair import add_credential_to_connector
 from danswer.db.connector_credential_pair import get_cc_pair_groups_for_ids
@@ -74,6 +79,7 @@ from danswer.db.document import get_document_counts_for_cc_pairs
 from danswer.db.engine import get_current_tenant_id
 from danswer.db.engine import get_session
 from danswer.db.enums import AccessType
+from danswer.db.enums import IndexingMode
 from danswer.db.index_attempt import get_index_attempts_for_cc_pair
 from danswer.db.index_attempt import get_latest_index_attempt_for_cc_pair_id
 from danswer.db.index_attempt import get_latest_index_attempts
@@ -83,10 +89,10 @@ from danswer.db.models import SearchSettings
 from danswer.db.models import User
 from danswer.db.search_settings import get_current_search_settings
 from danswer.db.search_settings import get_secondary_search_settings
+from danswer.file_processing.extract_file_text import convert_docx_to_txt
 from danswer.file_store.file_store import get_default_file_store
 from danswer.key_value_store.interface import KvKeyNotFoundError
 from danswer.redis.redis_connector import RedisConnector
-from danswer.redis.redis_pool import get_redis_client
 from danswer.server.documents.models import AuthStatus
 from danswer.server.documents.models import AuthUrl
 from danswer.server.documents.models import ConnectorCredentialPairIdentifier
@@ -308,6 +314,7 @@ def upsert_service_account_credential(
         credential_base = build_service_account_creds(
             DocumentSource.GOOGLE_DRIVE,
             primary_admin_email=service_account_credential_request.google_primary_admin,
+            name="Service Account (uploaded)",
         )
     except KvKeyNotFoundError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -316,7 +323,9 @@ def upsert_service_account_credential(
     delete_service_account_credentials(user, db_session, DocumentSource.GOOGLE_DRIVE)
     # `user=None` since this credential is not a personal credential
     credential = create_credential(
-        credential_data=credential_base, user=user, db_session=db_session
+        credential_data=credential_base,
+        user=user,
+        db_session=db_session,
     )
     return ObjectCreationIdResponse(id=credential.id)
 
@@ -391,6 +400,12 @@ def upload_files(
                 file_origin=FileOrigin.CONNECTOR,
                 file_type=file.content_type or "text/plain",
             )
+
+            if file.content_type and file.content_type.startswith(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ):
+                convert_docx_to_txt(file, file_store, file_path)
+
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return FileUploadResponse(file_paths=deduped_file_paths)
@@ -483,6 +498,38 @@ def get_currently_failed_indexing_status(
         )
 
     return indexing_statuses
+
+
+@router.get("/admin/connector")
+def get_connectors_by_credential(
+    _: User = Depends(current_curator_or_admin_user),
+    db_session: Session = Depends(get_session),
+    credential: int | None = None,
+) -> list[ConnectorSnapshot]:
+    """Get a list of connectors. Allow filtering by a specific credential id."""
+
+    connectors = fetch_connectors(db_session)
+
+    filtered_connectors = []
+    for connector in connectors:
+        if connector.source == DocumentSource.INGESTION_API:
+            # don't include INGESTION_API, as it's a system level
+            # connector not manageable by the user
+            continue
+
+        if credential is not None:
+            found = False
+            for cc_pair in connector.credentials:
+                if credential == cc_pair.credential_id:
+                    found = True
+                    break
+
+            if not found:
+                continue
+
+        filtered_connectors.append(ConnectorSnapshot.from_connector_db_model(connector))
+
+    return filtered_connectors
 
 
 @router.get("/admin/connector/indexing-status")
@@ -792,11 +839,9 @@ def connector_run_once(
     _: User = Depends(current_curator_or_admin_user),
     db_session: Session = Depends(get_session),
     tenant_id: str = Depends(get_current_tenant_id),
-) -> StatusResponse[list[int]]:
+) -> StatusResponse[int]:
     """Used to trigger indexing on a set of cc_pairs associated with a
     single connector."""
-
-    r = get_redis_client(tenant_id=tenant_id)
 
     connector_id = run_info.connector_id
     specified_credential_ids = run_info.credential_ids
@@ -843,54 +888,41 @@ def connector_run_once(
         )
     ]
 
-    search_settings = get_current_search_settings(db_session)
-
     connector_credential_pairs = [
         get_connector_credential_pair(connector_id, credential_id, db_session)
         for credential_id in credential_ids
         if credential_id not in skipped_credentials
     ]
 
-    index_attempt_ids = []
+    num_triggers = 0
     for cc_pair in connector_credential_pairs:
         if cc_pair is not None:
-            attempt_id = try_creating_indexing_task(
-                primary_app,
-                cc_pair,
-                search_settings,
-                run_info.from_beginning,
-                db_session,
-                r,
-                tenant_id,
+            indexing_mode = IndexingMode.UPDATE
+            if run_info.from_beginning:
+                indexing_mode = IndexingMode.REINDEX
+
+            mark_ccpair_with_indexing_trigger(cc_pair.id, indexing_mode, db_session)
+            num_triggers += 1
+
+            logger.info(
+                f"connector_run_once - marking cc_pair with indexing trigger: "
+                f"connector={run_info.connector_id} "
+                f"cc_pair={cc_pair.id} "
+                f"indexing_trigger={indexing_mode}"
             )
-            if attempt_id:
-                logger.info(
-                    f"connector_run_once - try_creating_indexing_task succeeded: "
-                    f"connector={run_info.connector_id} "
-                    f"cc_pair={cc_pair.id} "
-                    f"attempt={attempt_id} "
-                )
-                index_attempt_ids.append(attempt_id)
-            else:
-                logger.info(
-                    f"connector_run_once - try_creating_indexing_task failed: "
-                    f"connector={run_info.connector_id} "
-                    f"cc_pair={cc_pair.id}"
-                )
 
-    if not index_attempt_ids:
-        msg = "No new indexing attempts created, indexing jobs are queued or running."
-        logger.info(msg)
-        raise HTTPException(
-            status_code=400,
-            detail=msg,
-        )
+    # run the beat task to pick up the triggers immediately
+    primary_app.send_task(
+        DanswerCeleryTask.CHECK_FOR_INDEXING,
+        priority=DanswerCeleryPriority.HIGH,
+        kwargs={"tenant_id": tenant_id},
+    )
 
-    msg = f"Successfully created {len(index_attempt_ids)} index attempts. {index_attempt_ids}"
+    msg = f"Marked {num_triggers} index attempts with indexing triggers."
     return StatusResponse(
         success=True,
         message=msg,
-        data=index_attempt_ids,
+        data=num_triggers,
     )
 
 
@@ -942,7 +974,12 @@ def gmail_callback(
     credential_id = int(credential_id_cookie)
     verify_csrf(credential_id, callback.state)
     credentials: Credentials | None = update_credential_access_tokens(
-        callback.code, credential_id, user, db_session, DocumentSource.GMAIL
+        callback.code,
+        credential_id,
+        user,
+        db_session,
+        DocumentSource.GMAIL,
+        GoogleOAuthAuthenticationMethod.UPLOADED,
     )
     if credentials is None:
         raise HTTPException(
@@ -968,7 +1005,12 @@ def google_drive_callback(
     verify_csrf(credential_id, callback.state)
 
     credentials: Credentials | None = update_credential_access_tokens(
-        callback.code, credential_id, user, db_session, DocumentSource.GOOGLE_DRIVE
+        callback.code,
+        credential_id,
+        user,
+        db_session,
+        DocumentSource.GOOGLE_DRIVE,
+        GoogleOAuthAuthenticationMethod.UPLOADED,
     )
     if credentials is None:
         raise HTTPException(
@@ -1023,37 +1065,18 @@ def get_connector_by_id(
 
 
 class BasicCCPairInfo(BaseModel):
-    docs_indexed: int
     has_successful_run: bool
     source: DocumentSource
 
 
-@router.get("/indexing-status")
+@router.get("/connector-status")
 def get_basic_connector_indexing_status(
     _: User = Depends(current_user),
     db_session: Session = Depends(get_session),
 ) -> list[BasicCCPairInfo]:
     cc_pairs = get_connector_credential_pairs(db_session)
-    cc_pair_identifiers = [
-        ConnectorCredentialPairIdentifier(
-            connector_id=cc_pair.connector_id, credential_id=cc_pair.credential_id
-        )
-        for cc_pair in cc_pairs
-    ]
-    document_count_info = get_document_counts_for_cc_pairs(
-        db_session=db_session,
-        cc_pair_identifiers=cc_pair_identifiers,
-    )
-    cc_pair_to_document_cnt = {
-        (connector_id, credential_id): cnt
-        for connector_id, credential_id, cnt in document_count_info
-    }
     return [
         BasicCCPairInfo(
-            docs_indexed=cc_pair_to_document_cnt.get(
-                (cc_pair.connector_id, cc_pair.credential_id)
-            )
-            or 0,
             has_successful_run=cc_pair.last_successful_index_time is not None,
             source=cc_pair.connector.source,
         )

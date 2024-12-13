@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from danswer.configs.app_configs import DISABLE_INDEX_UPDATE_ON_SWAP
 from danswer.configs.app_configs import MANAGED_VESPA
+from danswer.configs.app_configs import VESPA_NUM_ATTEMPTS_ON_STARTUP
 from danswer.configs.constants import KV_REINDEX_KEY
 from danswer.configs.constants import KV_SEARCH_SETTINGS
 from danswer.configs.model_configs import FAST_GEN_AI_MODEL_VERSION
@@ -221,13 +222,13 @@ def setup_vespa(
     document_index: DocumentIndex,
     index_setting: IndexingSetting,
     secondary_index_setting: IndexingSetting | None,
+    num_attempts: int = VESPA_NUM_ATTEMPTS_ON_STARTUP,
 ) -> bool:
     # Vespa startup is a bit slow, so give it a few seconds
     WAIT_SECONDS = 5
-    VESPA_ATTEMPTS = 5
-    for x in range(VESPA_ATTEMPTS):
+    for x in range(num_attempts):
         try:
-            logger.notice(f"Setting up Vespa (attempt {x+1}/{VESPA_ATTEMPTS})...")
+            logger.notice(f"Setting up Vespa (attempt {x+1}/{num_attempts})...")
             document_index.ensure_indices_exist(
                 index_embedding_dim=index_setting.model_dim,
                 secondary_index_embedding_dim=secondary_index_setting.model_dim
@@ -244,7 +245,7 @@ def setup_vespa(
             time.sleep(WAIT_SECONDS)
 
     logger.error(
-        f"Vespa setup did not succeed. Attempt limit reached. ({VESPA_ATTEMPTS})"
+        f"Vespa setup did not succeed. Attempt limit reached. ({num_attempts})"
     )
     return False
 
@@ -254,13 +255,14 @@ def setup_postgres(db_session: Session) -> None:
     create_initial_public_credential(db_session)
     create_initial_default_connector(db_session)
     associate_default_cc_pair(db_session)
-
-    logger.notice("Loading default Prompts and Personas")
     delete_old_default_personas(db_session)
-    load_chat_yamls(db_session)
 
     logger.notice("Loading built-in tools")
     load_builtin_tools(db_session)
+
+    logger.notice("Loading default Prompts and Personas")
+    load_chat_yamls(db_session)
+
     refresh_built_in_tools_cache(db_session)
     auto_add_search_tool_to_personas(db_session)
 

@@ -546,15 +546,7 @@ Hint: Use the singular form of the object name (e.g., 'Opportunity' instead of '
   },
   slack: {
     description: "Configure Slack connector",
-    values: [
-      {
-        type: "text",
-        query: "Enter the Slack workspace:",
-        label: "Workspace",
-        name: "workspace",
-        optional: false,
-      },
-    ],
+    values: [],
     advanced_values: [
       {
         type: "list",
@@ -1050,6 +1042,21 @@ For example, specifying .*-support.* as a "channel" will cause the connector to 
     values: [],
     advanced_values: [],
   },
+  egnyte: {
+    description: "Configure Egnyte connector",
+    values: [
+      {
+        type: "text",
+        query: "Enter folder path to index:",
+        label: "Folder Path",
+        name: "folder_path",
+        optional: true,
+        description:
+          "The folder path to index (e.g., '/Shared/Documents'). Leave empty to index everything.",
+      },
+    ],
+    advanced_values: [],
+  },
 };
 export function createConnectorInitialValues(
   connector: ConfigurableSources
@@ -1134,6 +1141,20 @@ export interface ConnectorBase<T> {
 export interface Connector<T> extends ConnectorBase<T> {
   id: number;
   credential_ids: number[];
+  time_created: string;
+  time_updated: string;
+}
+
+export interface ConnectorSnapshot {
+  id: number;
+  name: string;
+  source: ValidSources;
+  input_type: ValidInputTypes;
+  // connector_specific_config
+  refresh_freq: number | null;
+  prune_freq: number | null;
+  credential_ids: number[];
+  indexing_start: number | null;
   time_created: string;
   time_updated: string;
 }
